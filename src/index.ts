@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const JSON_CONTENT_TYPE = "application/vnd.pypi.simple.v1+json";
 
 function normalizeName(name: string): string {
@@ -151,9 +153,12 @@ function extractVersion(filename: string): string {
 	return normalizeVersion(raw);
 }
 
-async function sha256Hex(data: ArrayBuffer): Promise<string> {
-	const hash = await crypto.subtle.digest("SHA-256", data);
-	return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+async function streamSha256(stream: ReadableStream<Uint8Array>): Promise<string> {
+	const hasher = createHash("sha256");
+	for await (const chunk of stream) {
+		hasher.update(chunk);
+	}
+	return hasher.digest("hex");
 }
 
 async function getRootIndex(bucket: R2Bucket): Promise<RootIndex> {
@@ -249,14 +254,23 @@ async function handlePackageUpload(
 	filename: string,
 ): Promise<Response> {
 	const normalized = normalizeName(project);
-	const body = await request.arrayBuffer();
-	const hash = await sha256Hex(body);
+	const { body } = request;
+	if (!body) return new Response("Missing body", { status: 400 });
+
 	const version = extractVersion(filename);
 	const requiresPython = request.headers.get("X-Requires-Python") ?? undefined;
 	const uploadTime = new Date().toISOString();
 
-	// Store the package file
-	await env.BUCKET.put(`packages/${normalized}/${filename}`, body);
+	// Tee the stream: one for R2, one for hashing
+	const [r2Stream, hashStream] = body.tee();
+
+	// Stream to R2 and compute hash concurrently
+	const [r2Obj, hash] = await Promise.all([
+		env.BUCKET.put(`packages/${normalized}/${filename}`, r2Stream, {
+			httpMetadata: { contentType: "application/octet-stream" },
+		}),
+		streamSha256(hashStream),
+	]);
 
 	// Update project index
 	let projectIndex = await getProjectIndex(env.BUCKET, normalized);
@@ -280,7 +294,7 @@ async function handlePackageUpload(
 		url: `/packages/${normalized}/${filename}`,
 		hashes: { sha256: hash },
 		...(requiresPython ? { "requires-python": requiresPython } : {}),
-		size: body.byteLength,
+		size: r2Obj.size,
 		"upload-time": uploadTime,
 	});
 
