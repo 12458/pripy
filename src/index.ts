@@ -1,18 +1,309 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `npm run dev` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `npm run deploy` to publish your worker
- *
- * Bind resources to your worker in `wrangler.jsonc`. After adding bindings, a type definition for the
- * `Env` object can be regenerated with `npm run cf-typegen`.
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+const JSON_CONTENT_TYPE = "application/vnd.pypi.simple.v1+json";
+
+function normalizeName(name: string): string {
+	return name.toLowerCase().replace(/[-_.]+/g, "-");
+}
+
+function acceptsJson(request: Request): boolean {
+	const accept = request.headers.get("Accept") ?? "";
+	return accept.includes(JSON_CONTENT_TYPE) || accept.includes("*/*");
+}
+
+function jsonResponse(data: unknown, headers: Record<string, string> = {}): Response {
+	return new Response(JSON.stringify(data), {
+		headers: {
+			"Content-Type": `${JSON_CONTENT_TYPE}; charset=utf-8`,
+			...headers,
+		},
+	});
+}
+
+function notAcceptable(): Response {
+	return new Response("Not Acceptable: use Accept: application/vnd.pypi.simple.v1+json", { status: 406 });
+}
+
+function unauthorized(): Response {
+	return new Response("Unauthorized", { status: 401 });
+}
+
+function notFound(): Response {
+	return new Response("Not Found", { status: 404 });
+}
+
+interface ProjectIndex {
+	meta: { "api-version": string };
+	name: string;
+	versions: string[];
+	files: {
+		filename: string;
+		url: string;
+		hashes: { sha256: string };
+		"requires-python"?: string;
+		size: number;
+		"upload-time": string;
+	}[];
+}
+
+interface RootIndex {
+	meta: { "api-version": string };
+	projects: { name: string }[];
+}
+
+function extractVersion(filename: string): string {
+	// wheel: name-version-pytag-abitag-platform.whl
+	if (filename.endsWith(".whl")) {
+		const parts = filename.split("-");
+		return parts.length >= 2 ? parts[1] : "0.0.0";
+	}
+	// sdist: name-version.tar.gz or name-version.zip
+	let stripped = filename;
+	for (const ext of [".tar.gz", ".tar.bz2", ".zip", ".tar.xz"]) {
+		if (stripped.endsWith(ext)) {
+			stripped = stripped.slice(0, -ext.length);
+			break;
+		}
+	}
+	const lastDash = stripped.lastIndexOf("-");
+	return lastDash !== -1 ? stripped.slice(lastDash + 1) : "0.0.0";
+}
+
+async function sha256Hex(data: ArrayBuffer): Promise<string> {
+	const hash = await crypto.subtle.digest("SHA-256", data);
+	return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function getRootIndex(bucket: R2Bucket): Promise<RootIndex> {
+	const obj = await bucket.get("simple/index.json");
+	if (obj) {
+		return obj.json();
+	}
+	return { meta: { "api-version": "1.1" }, projects: [] };
+}
+
+async function getProjectIndex(bucket: R2Bucket, normalized: string): Promise<ProjectIndex | null> {
+	const obj = await bucket.get(`simple/${normalized}/index.json`);
+	if (obj) {
+		return obj.json();
+	}
+	return null;
+}
+
+async function putProjectIndex(bucket: R2Bucket, normalized: string, index: ProjectIndex): Promise<void> {
+	await bucket.put(`simple/${normalized}/index.json`, JSON.stringify(index));
+}
+
+async function putRootIndex(bucket: R2Bucket, index: RootIndex): Promise<void> {
+	await bucket.put("simple/index.json", JSON.stringify(index));
+}
+
+async function invalidateCache(cache: Cache, url: URL, paths: string[]): Promise<void> {
+	for (const path of paths) {
+		const cacheUrl = new URL(path, url.origin);
+		await cache.delete(new Request(cacheUrl.toString()));
+	}
+}
+
+// --- Route handlers ---
+
+async function handleRootIndex(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	if (!acceptsJson(request)) return notAcceptable();
+
+	const cache = caches.default;
+	const cacheKey = new Request(new URL("/simple/", request.url).toString());
+	const cached = await cache.match(cacheKey);
+	if (cached) return cached;
+
+	const index = await getRootIndex(env.BUCKET);
+	const response = jsonResponse(index, { "Cache-Control": "public, max-age=600" });
+
+	ctx.waitUntil(cache.put(cacheKey, response.clone()));
+	return response;
+}
+
+async function handleProjectIndex(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+): Promise<Response> {
+	if (!acceptsJson(request)) return notAcceptable();
+
+	const normalized = normalizeName(project);
+	const cache = caches.default;
+	const cacheKey = new Request(new URL(`/simple/${normalized}/`, request.url).toString());
+	const cached = await cache.match(cacheKey);
+	if (cached) return cached;
+
+	const index = await getProjectIndex(env.BUCKET, normalized);
+	if (!index) return notFound();
+
+	const response = jsonResponse(index, { "Cache-Control": "public, max-age=600" });
+	ctx.waitUntil(cache.put(cacheKey, response.clone()));
+	return response;
+}
+
+async function handlePackageDownload(env: Env, project: string, filename: string): Promise<Response> {
+	const normalized = normalizeName(project);
+	const obj = await env.BUCKET.get(`packages/${normalized}/${filename}`);
+	if (!obj) return notFound();
+
+	return new Response(obj.body, {
+		headers: {
+			"Content-Type": "application/octet-stream",
+			"Content-Length": obj.size.toString(),
+			"Cache-Control": "public, max-age=31536000, immutable",
+			ETag: obj.httpEtag,
+		},
+	});
+}
+
+async function handlePackageUpload(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+	filename: string,
+): Promise<Response> {
+	if (request.headers.get("Authorization") !== `Bearer ${env.UPLOAD_TOKEN}`) {
+		return unauthorized();
+	}
+
+	const normalized = normalizeName(project);
+	const body = await request.arrayBuffer();
+	const hash = await sha256Hex(body);
+	const version = extractVersion(filename);
+	const requiresPython = request.headers.get("X-Requires-Python") ?? undefined;
+	const uploadTime = new Date().toISOString();
+
+	// Store the package file
+	await env.BUCKET.put(`packages/${normalized}/${filename}`, body);
+
+	// Update project index
+	let projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	let isNewProject = false;
+
+	if (!projectIndex) {
+		isNewProject = true;
+		projectIndex = {
+			meta: { "api-version": "1.1" },
+			name: normalized,
+			versions: [],
+			files: [],
+		};
+	}
+
+	// Check for duplicate filename and replace
+	projectIndex.files = projectIndex.files.filter((f) => f.filename !== filename);
+
+	projectIndex.files.push({
+		filename,
+		url: `/packages/${normalized}/${filename}`,
+		hashes: { sha256: hash },
+		...(requiresPython ? { "requires-python": requiresPython } : {}),
+		size: body.byteLength,
+		"upload-time": uploadTime,
+	});
+
+	if (!projectIndex.versions.includes(version)) {
+		projectIndex.versions.push(version);
+		projectIndex.versions.sort();
+	}
+
+	await putProjectIndex(env.BUCKET, normalized, projectIndex);
+
+	// Update root index if new project
+	if (isNewProject) {
+		const rootIndex = await getRootIndex(env.BUCKET);
+		if (!rootIndex.projects.some((p) => p.name === normalized)) {
+			rootIndex.projects.push({ name: normalized });
+			rootIndex.projects.sort((a, b) => a.name.localeCompare(b.name));
+			await putRootIndex(env.BUCKET, rootIndex);
+		}
+	}
+
+	// Invalidate caches
+	const url = new URL(request.url);
+	ctx.waitUntil(invalidateCache(caches.default, url, ["/simple/", `/simple/${normalized}/`]));
+
+	return new Response("OK", { status: 201 });
+}
+
+async function handlePackageDelete(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+	filename: string,
+): Promise<Response> {
+	if (request.headers.get("Authorization") !== `Bearer ${env.UPLOAD_TOKEN}`) {
+		return unauthorized();
+	}
+
+	const normalized = normalizeName(project);
+
+	// Delete the package file
+	await env.BUCKET.delete(`packages/${normalized}/${filename}`);
+
+	// Update project index
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (projectIndex) {
+		projectIndex.files = projectIndex.files.filter((f) => f.filename !== filename);
+
+		// Recalculate versions from remaining files
+		const remainingVersions = new Set(projectIndex.files.map((f) => extractVersion(f.filename)));
+		projectIndex.versions = [...remainingVersions].sort();
+
+		if (projectIndex.files.length === 0) {
+			// Remove empty project
+			await env.BUCKET.delete(`simple/${normalized}/index.json`);
+			const rootIndex = await getRootIndex(env.BUCKET);
+			rootIndex.projects = rootIndex.projects.filter((p) => p.name !== normalized);
+			await putRootIndex(env.BUCKET, rootIndex);
+		} else {
+			await putProjectIndex(env.BUCKET, normalized, projectIndex);
+		}
+	}
+
+	// Invalidate caches
+	const url = new URL(request.url);
+	ctx.waitUntil(invalidateCache(caches.default, url, ["/simple/", `/simple/${normalized}/`]));
+
+	return new Response("OK", { status: 200 });
+}
+
+// --- Router ---
 
 export default {
-	async fetch(request, env, ctx): Promise<Response> {
-		return new Response('Hello World!');
+	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		const url = new URL(request.url);
+		const path = url.pathname;
+
+		// GET /simple/ - root index
+		if (path === "/simple/" && request.method === "GET") {
+			return handleRootIndex(request, env, ctx);
+		}
+
+		// GET /simple/<project>/ - project index
+		const projectMatch = path.match(/^\/simple\/([^/]+)\/$/);
+		if (projectMatch && request.method === "GET") {
+			return handleProjectIndex(request, env, ctx, projectMatch[1]);
+		}
+
+		// /packages/<project>/<filename>
+		const packageMatch = path.match(/^\/packages\/([^/]+)\/([^/]+)$/);
+		if (packageMatch) {
+			const [, project, filename] = packageMatch;
+			if (request.method === "GET") {
+				return handlePackageDownload(env, project, filename);
+			}
+			if (request.method === "PUT") {
+				return handlePackageUpload(request, env, ctx, project, filename);
+			}
+			if (request.method === "DELETE") {
+				return handlePackageDelete(request, env, ctx, project, filename);
+			}
+		}
+
+		return notFound();
 	},
 } satisfies ExportedHandler<Env>;
