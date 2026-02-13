@@ -59,22 +59,96 @@ interface RootIndex {
 	projects: { name: string }[];
 }
 
+// PEP 440 version pattern (permissive, for parsing + normalization)
+const VERSION_RE = new RegExp(
+	[
+		"^",
+		"v?",
+		"(?:(?<epoch>[0-9]+)!)?",
+		"(?<release>[0-9]+(?:\\.[0-9]+)*)",
+		"(?<pre>[-_.]?(?<pre_l>alpha|beta|preview|pre|a|b|c|rc)[-_.]?(?<pre_n>[0-9]*))?",
+		"(?:(?<post1>-(?<post_n1>[0-9]+))|(?<post2>[-_.]?(?<post_l>post|rev|r)[-_.]?(?<post_n2>[0-9]*)))?",
+		"(?<dev>[-_.]?dev[-_.]?(?<dev_n>[0-9]*))?",
+		"(?:\\+(?<local>[a-z0-9]+(?:[-_.][a-z0-9]+)*))?",
+		"$",
+	].join(""),
+	"i",
+);
+
+const PRE_SPELLING: Record<string, string> = {
+	alpha: "a",
+	beta: "b",
+	preview: "rc",
+	pre: "rc",
+	c: "rc",
+	a: "a",
+	b: "b",
+	rc: "rc",
+};
+
+function normalizeVersion(v: string): string {
+	const m = v.trim().match(VERSION_RE);
+	if (!m || !m.groups) return v;
+	const g = m.groups;
+
+	// Release segment: strip leading zeros from each component
+	const release = g.release
+		.split(".")
+		.map((s) => String(parseInt(s, 10)))
+		.join(".");
+
+	let result = "";
+	if (g.epoch && g.epoch !== "0") result += `${parseInt(g.epoch, 10)}!`;
+	result += release;
+
+	// Pre-release
+	if (g.pre_l) {
+		const label = PRE_SPELLING[g.pre_l.toLowerCase()];
+		const num = g.pre_n ? parseInt(g.pre_n, 10) : 0;
+		result += `${label}${num}`;
+	}
+
+	// Post-release
+	if (g.post_n1 !== undefined) {
+		result += `.post${parseInt(g.post_n1, 10)}`;
+	} else if (g.post_l) {
+		const num = g.post_n2 ? parseInt(g.post_n2, 10) : 0;
+		result += `.post${num}`;
+	}
+
+	// Dev release
+	if (g.dev !== undefined && g.dev !== "") {
+		const num = g.dev_n ? parseInt(g.dev_n, 10) : 0;
+		result += `.dev${num}`;
+	}
+
+	// Local
+	if (g.local) {
+		result += `+${g.local.toLowerCase().replace(/[-_]/g, ".")}`;
+	}
+
+	return result;
+}
+
 function extractVersion(filename: string): string {
+	let raw: string;
 	// wheel: name-version-pytag-abitag-platform.whl
 	if (filename.endsWith(".whl")) {
 		const parts = filename.split("-");
-		return parts.length >= 2 ? parts[1] : "0.0.0";
-	}
-	// sdist: name-version.tar.gz or name-version.zip
-	let stripped = filename;
-	for (const ext of [".tar.gz", ".tar.bz2", ".zip", ".tar.xz"]) {
-		if (stripped.endsWith(ext)) {
-			stripped = stripped.slice(0, -ext.length);
-			break;
+		raw = parts.length >= 2 ? parts[1] : "0.0.0";
+	} else {
+		// sdist: name-version.tar.gz or name-version.zip
+		let stripped = filename;
+		for (const ext of [".tar.gz", ".tar.bz2", ".zip", ".tar.xz"]) {
+			if (stripped.endsWith(ext)) {
+				stripped = stripped.slice(0, -ext.length);
+				break;
+			}
 		}
+		const lastDash = stripped.lastIndexOf("-");
+		raw = lastDash !== -1 ? stripped.slice(lastDash + 1) : "0.0.0";
 	}
-	const lastDash = stripped.lastIndexOf("-");
-	return lastDash !== -1 ? stripped.slice(lastDash + 1) : "0.0.0";
+	return normalizeVersion(raw);
 }
 
 async function sha256Hex(data: ArrayBuffer): Promise<string> {

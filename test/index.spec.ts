@@ -133,6 +133,77 @@ describe("pripy", () => {
 		});
 	});
 
+	describe("PEP 440 version normalization", () => {
+		it("normalizes pre-release spelling", async () => {
+			await upload("pkg", "pkg-1.0alpha1-py3-none-any.whl");
+			await upload("pkg", "pkg-2.0Beta2-py3-none-any.whl");
+			await upload("pkg", "pkg-3.0C1-py3-none-any.whl");
+			await upload("pkg", "pkg-4.0preview3-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0a1", "2.0b2", "3.0rc1", "4.0rc3"]);
+		});
+
+		it("normalizes post-release forms", async () => {
+			await upload("pkg", "pkg-1.0.post1-py3-none-any.whl");
+			await upload("pkg", "pkg-2.0.rev2-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0.post1", "2.0.post2"]);
+		});
+
+		it("normalizes dev releases", async () => {
+			await upload("pkg", "pkg-1.0.dev3-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0.dev3"]);
+		});
+
+		it("strips leading v and normalizes leading zeros", async () => {
+			await upload("pkg", "pkg-v01.02.03-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.2.3"]);
+		});
+
+		it("handles epoch", async () => {
+			await upload("pkg", "pkg-1!2.0-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1!2.0"]);
+		});
+
+		it("normalizes local version separators", async () => {
+			await upload("pkg", "pkg-1.0+local_build-1-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0+local.build.1"]);
+		});
+
+		it("normalizes implicit pre-release number", async () => {
+			await upload("pkg", "pkg-1.0a-py3-none-any.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0a0"]);
+		});
+
+		it("normalizes sdist versions", async () => {
+			await upload("pkg", "pkg-1.0.Alpha1.tar.gz");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0a1"]);
+		});
+
+		it("deduplicates equivalent versions", async () => {
+			await upload("pkg", "pkg-1.0RC1-py3-none-any.whl");
+			await upload("pkg", "pkg-1.0rc1-py3-none-linux_x86_64.whl");
+			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data.versions).toEqual(["1.0rc1"]);
+			expect(data.files).toHaveLength(2);
+		});
+	});
+
 	describe("auth", () => {
 		it("rejects requests without auth", async () => {
 			const res = await call("GET", "/simple/", { accept: JSON_ACCEPT, auth: false });
