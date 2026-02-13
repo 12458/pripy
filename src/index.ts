@@ -23,7 +23,17 @@ function notAcceptable(): Response {
 }
 
 function unauthorized(): Response {
-	return new Response("Unauthorized", { status: 401 });
+	return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Basic" } });
+}
+
+function checkAuth(request: Request, token: string): boolean {
+	const auth = request.headers.get("Authorization") ?? "";
+	if (auth === `Bearer ${token}`) return true;
+	if (auth.startsWith("Basic ")) {
+		const [, password] = atob(auth.slice(6)).split(":");
+		return password === token;
+	}
+	return false;
 }
 
 function notFound(): Response {
@@ -164,10 +174,6 @@ async function handlePackageUpload(
 	project: string,
 	filename: string,
 ): Promise<Response> {
-	if (request.headers.get("Authorization") !== `Bearer ${env.UPLOAD_TOKEN}`) {
-		return unauthorized();
-	}
-
 	const normalized = normalizeName(project);
 	const body = await request.arrayBuffer();
 	const hash = await sha256Hex(body);
@@ -235,10 +241,6 @@ async function handlePackageDelete(
 	project: string,
 	filename: string,
 ): Promise<Response> {
-	if (request.headers.get("Authorization") !== `Bearer ${env.UPLOAD_TOKEN}`) {
-		return unauthorized();
-	}
-
 	const normalized = normalizeName(project);
 
 	// Delete the package file
@@ -275,6 +277,8 @@ async function handlePackageDelete(
 
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+		if (!checkAuth(request, env.UPLOAD_TOKEN)) return unauthorized();
+
 		const url = new URL(request.url);
 		const path = url.pathname;
 

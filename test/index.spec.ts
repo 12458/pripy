@@ -9,11 +9,12 @@ const TOKEN = "test-token";
 async function call(
 	method: string,
 	path: string,
-	opts: { accept?: string; auth?: string; body?: BodyInit; headers?: Record<string, string> } = {},
+	opts: { accept?: string; auth?: string | false; body?: BodyInit; headers?: Record<string, string> } = {},
 ) {
 	const headers: Record<string, string> = {};
 	if (opts.accept) headers["Accept"] = opts.accept;
-	if (opts.auth) headers["Authorization"] = `Bearer ${opts.auth}`;
+	const auth = opts.auth === undefined ? TOKEN : opts.auth;
+	if (auth) headers["Authorization"] = `Bearer ${auth}`;
 	if (opts.headers) Object.assign(headers, opts.headers);
 
 	const request = new IncomingRequest(`http://localhost${path}`, {
@@ -132,21 +133,29 @@ describe("pripy", () => {
 		});
 	});
 
-	describe("package upload", () => {
-		it("requires auth token", async () => {
-			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
-				body: new TextEncoder().encode("data"),
-			});
+	describe("auth", () => {
+		it("rejects requests without auth", async () => {
+			const res = await call("GET", "/simple/", { accept: JSON_ACCEPT, auth: false });
 			expect(res.status).toBe(401);
 		});
 
 		it("rejects wrong token", async () => {
-			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
-				auth: "wrong-token",
-				body: new TextEncoder().encode("data"),
-			});
+			const res = await call("GET", "/simple/", { accept: JSON_ACCEPT, auth: "wrong-token" });
 			expect(res.status).toBe(401);
 		});
+
+		it("accepts Basic auth (username ignored, password is token)", async () => {
+			const basic = btoa(`anything:${TOKEN}`);
+			const res = await call("GET", "/simple/", {
+				accept: JSON_ACCEPT,
+				auth: false,
+				headers: { Authorization: `Basic ${basic}` },
+			});
+			expect(res.status).toBe(200);
+		});
+	});
+
+	describe("package upload", () => {
 
 		it("returns 201 on successful upload", async () => {
 			const res = await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
@@ -182,11 +191,6 @@ describe("pripy", () => {
 	});
 
 	describe("package delete", () => {
-		it("requires auth token", async () => {
-			const res = await call("DELETE", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
-			expect(res.status).toBe(401);
-		});
-
 		it("removes file from project index", async () => {
 			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
 			await upload("my-pkg", "my_pkg-2.0.0-py3-none-any.whl");
