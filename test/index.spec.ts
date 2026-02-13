@@ -174,7 +174,7 @@ describe("pripy", () => {
 		});
 
 		it("normalizes local version separators", async () => {
-			await upload("pkg", "pkg-1.0+local_build-1-py3-none-any.whl");
+			await upload("pkg", "pkg-1.0+local_build.1-py3-none-any.whl");
 			const res = await call("GET", "/simple/pkg/", { accept: JSON_ACCEPT });
 			const data = await res.json() as any;
 			expect(data.versions).toEqual(["1.0+local.build.1"]);
