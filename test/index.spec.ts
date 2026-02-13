@@ -227,10 +227,30 @@ describe("pripy", () => {
 	});
 
 	describe("package upload", () => {
-
 		it("returns 201 on successful upload", async () => {
 			const res = await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
 			expect(res.status).toBe(201);
+		});
+
+		it("returns 409 when uploading duplicate filename", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "v1");
+			const res = await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "v1-modified");
+			expect(res.status).toBe(409);
+
+			// Original file is unchanged
+			const dl = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
+			expect(await dl.text()).toBe("v1");
+		});
+
+		it("allows same version with different filenames", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "universal");
+			const res = await upload("my-pkg", "my_pkg-1.0.0-cp312-cp312-linux_x86_64.whl", "linux");
+			expect(res.status).toBe(201);
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files).toHaveLength(2);
+			expect(data.versions).toEqual(["1.0.0"]);
 		});
 
 		it("handles multiple versions", async () => {

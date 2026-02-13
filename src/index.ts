@@ -257,6 +257,12 @@ async function handlePackageUpload(
 	const { body } = request;
 	if (!body) return new Response("Missing body", { status: 400 });
 
+	// Immutability check: reject if filename already exists
+	const existing = await env.BUCKET.head(`packages/${normalized}/${filename}`);
+	if (existing) {
+		return new Response("File already exists. Releases are immutable.", { status: 409 });
+	}
+
 	const version = extractVersion(filename);
 	const requiresPython = request.headers.get("X-Requires-Python") ?? undefined;
 	const uploadTime = new Date().toISOString();
@@ -285,9 +291,6 @@ async function handlePackageUpload(
 			files: [],
 		};
 	}
-
-	// Check for duplicate filename and replace
-	projectIndex.files = projectIndex.files.filter((f) => f.filename !== filename);
 
 	projectIndex.files.push({
 		filename,
@@ -341,7 +344,7 @@ async function handlePackageDelete(
 
 		// Recalculate versions from remaining files
 		const remainingVersions = new Set(projectIndex.files.map((f) => extractVersion(f.filename)));
-		projectIndex.versions = [...remainingVersions].sort();
+		projectIndex.versions = Array.from(remainingVersions).sort();
 
 		if (projectIndex.files.length === 0) {
 			// Remove empty project
