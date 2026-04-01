@@ -582,6 +582,139 @@ describe("pripy", () => {
 		});
 	});
 
+	describe("provenance / attestations", () => {
+		const sampleProvenance = {
+			version: 1,
+			attestation_bundles: [{
+				publisher: { kind: "GitHub", claims: {} },
+				attestations: [{
+					version: 1,
+					verification_material: { certificate: "base64cert", transparency_entries: [] },
+					envelope: { statement: "base64stmt", signature: "base64sig" },
+				}],
+			}],
+		};
+
+		it("uploads and retrieves provenance for a file", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify(sampleProvenance),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			// Check provenance URL in project index
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].provenance).toBe("/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+
+			// Retrieve provenance
+			const prov = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+			expect(prov.status).toBe(200);
+			const provData = await prov.json() as any;
+			expect(provData.version).toBe(1);
+			expect(provData.attestation_bundles).toHaveLength(1);
+		});
+
+		it("provenance is absent by default", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].provenance).toBeUndefined();
+		});
+
+		it("returns 404 for provenance of nonexistent file", async () => {
+			const res = await call("PUT", "/packages/my-pkg/nonexistent-1.0.0.whl.provenance", {
+				body: JSON.stringify(sampleProvenance),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(404);
+		});
+
+		it("returns 404 when downloading absent provenance", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+			expect(res.status).toBe(404);
+		});
+
+		it("rejects invalid provenance version", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify({ version: 2, attestation_bundles: [] }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(400);
+		});
+
+		it("rejects empty attestation_bundles", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify({ version: 1, attestation_bundles: [] }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(400);
+		});
+
+		it("provenance is mutable (can be updated)", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify(sampleProvenance),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			const updated = {
+				...sampleProvenance,
+				attestation_bundles: [
+					...sampleProvenance.attestation_bundles,
+					{
+						publisher: { kind: "GitLab", claims: {} },
+						attestations: [{
+							version: 1,
+							verification_material: { certificate: "cert2", transparency_entries: [] },
+							envelope: { statement: "stmt2", signature: "sig2" },
+						}],
+					},
+				],
+			};
+			const res = await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify(updated),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			const prov = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+			const data = await prov.json() as any;
+			expect(data.attestation_bundles).toHaveLength(2);
+		});
+
+		it("provenance is deleted with file", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify(sampleProvenance),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			await call("DELETE", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+			expect(res.status).toBe(404);
+		});
+
+		it("quarantined project hides provenance", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PUT", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance", {
+				body: JSON.stringify(sampleProvenance),
+				headers: { "Content-Type": "application/json" },
+			});
+			await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "quarantined" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			const res = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance");
+			expect(res.status).toBe(404);
+		});
+	});
+
 	describe("routing", () => {
 		it("returns 404 for unknown paths", async () => {
 			const res = await call("GET", "/unknown");

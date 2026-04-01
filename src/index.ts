@@ -57,6 +57,7 @@ interface ProjectIndex {
 		hashes: { sha256: string };
 		"requires-python"?: string;
 		yanked?: string | boolean;
+		provenance?: string | null;
 		size: number;
 		"upload-time": string;
 	}[];
@@ -355,8 +356,11 @@ async function handlePackageDelete(
 ): Promise<Response> {
 	const normalized = normalizeName(project);
 
-	// Delete the package file
-	await env.BUCKET.delete(`packages/${normalized}/${filename}`);
+	// Delete the package file and its provenance (if any)
+	await Promise.all([
+		env.BUCKET.delete(`packages/${normalized}/${filename}`),
+		env.BUCKET.delete(`packages/${normalized}/${filename}.provenance`),
+	]);
 
 	// Update project index
 	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
@@ -432,6 +436,71 @@ async function handlePackageYank(
 	return new Response("OK", { status: 200 });
 }
 
+async function handleProvenanceUpload(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+	filename: string,
+): Promise<Response> {
+	const normalized = normalizeName(project);
+
+	// The base file must exist
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (!projectIndex) return notFound();
+
+	const file = projectIndex.files.find((f) => f.filename === filename);
+	if (!file) return notFound();
+
+	// Validate provenance JSON
+	let provenance: { version: number; attestation_bundles: unknown[] };
+	try {
+		provenance = await request.json();
+	} catch {
+		return new Response("Invalid JSON body", { status: 400 });
+	}
+
+	if (provenance.version !== 1) {
+		return new Response('"version" must be 1', { status: 400 });
+	}
+	if (!Array.isArray(provenance.attestation_bundles) || provenance.attestation_bundles.length === 0) {
+		return new Response('"attestation_bundles" must be a non-empty array', { status: 400 });
+	}
+
+	// Store provenance object
+	const provenanceKey = `packages/${normalized}/${filename}.provenance`;
+	await env.BUCKET.put(provenanceKey, JSON.stringify(provenance), {
+		httpMetadata: { contentType: "application/json" },
+	});
+
+	// Update file entry with provenance URL
+	file.provenance = `/packages/${normalized}/${filename}.provenance`;
+	await putProjectIndex(env.BUCKET, normalized, projectIndex);
+
+	const url = new URL(request.url);
+	ctx.waitUntil(invalidateCache(caches.default, url, [`/simple/${normalized}/`]));
+
+	return new Response("OK", { status: 200 });
+}
+
+async function handleProvenanceDownload(env: Env, project: string, filename: string): Promise<Response> {
+	const normalized = normalizeName(project);
+
+	// Quarantined projects must not offer distributions
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (projectIndex?.["project-status"]?.status === "quarantined") return notFound();
+
+	const obj = await env.BUCKET.get(`packages/${normalized}/${filename}.provenance`);
+	if (!obj) return notFound();
+
+	return new Response(obj.body, {
+		headers: {
+			"Content-Type": "application/json",
+			"Cache-Control": "public, max-age=600",
+		},
+	});
+}
+
 async function handleProjectStatus(
 	request: Request,
 	env: Env,
@@ -503,6 +572,18 @@ export default {
 		}
 		if (projectMatch && request.method === "PATCH") {
 			return handleProjectStatus(request, env, ctx, projectMatch[1]);
+		}
+
+		// /packages/<project>/<filename>.provenance - provenance objects
+		const provenanceMatch = path.match(/^\/packages\/([^/]+)\/([^/]+)\.provenance$/);
+		if (provenanceMatch) {
+			const [, project, filename] = provenanceMatch;
+			if (request.method === "GET") {
+				return handleProvenanceDownload(env, project, filename);
+			}
+			if (request.method === "PUT") {
+				return handleProvenanceUpload(request, env, ctx, project, filename);
+			}
 		}
 
 		// /packages/<project>/<filename>
