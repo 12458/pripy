@@ -348,16 +348,26 @@ describe("pripy", () => {
 			expect(data.files[0].yanked).toBe("security vulnerability");
 		});
 
-		it("yanks a file with empty reason", async () => {
+		it("yanks a file with boolean true (no reason)", async () => {
 			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
-			await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
-				body: JSON.stringify({ yanked: "" }),
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: true }),
 				headers: { "Content-Type": "application/json" },
 			});
+			expect(res.status).toBe(200);
 
 			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
 			const data = await idx.json() as any;
-			expect(data.files[0].yanked).toBe("");
+			expect(data.files[0].yanked).toBe(true);
+		});
+
+		it("rejects empty string as yanked reason", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: "" }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(400);
 		});
 
 		it("unyanks a file", async () => {

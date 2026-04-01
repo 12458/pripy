@@ -51,7 +51,7 @@ interface ProjectIndex {
 		url: string;
 		hashes: { sha256: string };
 		"requires-python"?: string;
-		yanked?: string | false;
+		yanked?: string | boolean;
 		size: number;
 		"upload-time": string;
 	}[];
@@ -380,7 +380,7 @@ async function handlePackageYank(
 	const file = projectIndex.files.find((f) => f.filename === filename);
 	if (!file) return notFound();
 
-	let body: { yanked?: string | false };
+	let body: { yanked?: string | boolean };
 	try {
 		body = await request.json();
 	} catch {
@@ -393,10 +393,15 @@ async function handlePackageYank(
 
 	if (body.yanked === false) {
 		delete file.yanked;
+	} else if (body.yanked === true) {
+		file.yanked = true;
 	} else if (typeof body.yanked === "string") {
+		if (body.yanked === "") {
+			return new Response('"yanked" string must be non-empty', { status: 400 });
+		}
 		file.yanked = body.yanked;
 	} else {
-		return new Response('"yanked" must be a string or false', { status: 400 });
+		return new Response('"yanked" must be a boolean or non-empty string', { status: 400 });
 	}
 
 	await putProjectIndex(env.BUCKET, normalized, projectIndex);
