@@ -334,6 +334,83 @@ describe("pripy", () => {
 		});
 	});
 
+	describe("file yanking", () => {
+		it("yanks a file with a reason", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: "security vulnerability" }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].yanked).toBe("security vulnerability");
+		});
+
+		it("yanks a file with empty reason", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: "" }),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].yanked).toBe("");
+		});
+
+		it("unyanks a file", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: "oops" }),
+				headers: { "Content-Type": "application/json" },
+			});
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: false }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].yanked).toBeUndefined();
+		});
+
+		it("returns 404 for unknown project", async () => {
+			const res = await call("PATCH", "/packages/unknown/unknown-1.0.0.whl", {
+				body: JSON.stringify({ yanked: "reason" }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(404);
+		});
+
+		it("returns 404 for unknown file", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-2.0.0-py3-none-any.whl", {
+				body: JSON.stringify({ yanked: "reason" }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(404);
+		});
+
+		it("returns 400 for invalid body", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl", {
+				body: "not json",
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(400);
+		});
+
+		it("uploaded files are not yanked by default", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data.files[0].yanked).toBeUndefined();
+		});
+	});
+
 	describe("routing", () => {
 		it("returns 404 for unknown paths", async () => {
 			const res = await call("GET", "/unknown");

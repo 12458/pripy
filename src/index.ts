@@ -51,6 +51,7 @@ interface ProjectIndex {
 		url: string;
 		hashes: { sha256: string };
 		"requires-python"?: string;
+		yanked?: string | false;
 		size: number;
 		"upload-time": string;
 	}[];
@@ -364,6 +365,48 @@ async function handlePackageDelete(
 	return new Response("OK", { status: 200 });
 }
 
+async function handlePackageYank(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+	filename: string,
+): Promise<Response> {
+	const normalized = normalizeName(project);
+
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (!projectIndex) return notFound();
+
+	const file = projectIndex.files.find((f) => f.filename === filename);
+	if (!file) return notFound();
+
+	let body: { yanked?: string | false };
+	try {
+		body = await request.json();
+	} catch {
+		return new Response("Invalid JSON body", { status: 400 });
+	}
+
+	if (body.yanked === undefined) {
+		return new Response('Missing "yanked" field', { status: 400 });
+	}
+
+	if (body.yanked === false) {
+		delete file.yanked;
+	} else if (typeof body.yanked === "string") {
+		file.yanked = body.yanked;
+	} else {
+		return new Response('"yanked" must be a string or false', { status: 400 });
+	}
+
+	await putProjectIndex(env.BUCKET, normalized, projectIndex);
+
+	const url = new URL(request.url);
+	ctx.waitUntil(invalidateCache(caches.default, url, [`/simple/${normalized}/`]));
+
+	return new Response("OK", { status: 200 });
+}
+
 // --- Router ---
 
 export default {
@@ -396,6 +439,9 @@ export default {
 			}
 			if (request.method === "DELETE") {
 				return handlePackageDelete(request, env, ctx, project, filename);
+			}
+			if (request.method === "PATCH") {
+				return handlePackageYank(request, env, ctx, project, filename);
 			}
 		}
 
