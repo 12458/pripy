@@ -96,26 +96,86 @@ All endpoints require authentication. Both methods are supported:
 - **Basic Auth** (for pip/uv): username is ignored, password is the token
 - **Bearer token** (for curl/scripts): `Authorization: Bearer <token>`
 
+### Yank a file
+
+```bash
+# Yank with a reason
+curl -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"yanked": "security vulnerability"}' \
+  $URL/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl
+
+# Unyank
+curl -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"yanked": false}' \
+  $URL/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl
+```
+
+### Set project status
+
+```bash
+# Archive a project (blocks further uploads)
+curl -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project-status": {"status": "archived", "reason": "no longer maintained"}}' \
+  $URL/simple/my-pkg/
+
+# Clear status (back to active)
+curl -X PATCH \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"project-status": null}' \
+  $URL/simple/my-pkg/
+```
+
+Supported statuses: `active` (default), `archived`, `quarantined`, `deprecated`.
+
+### Upload provenance attestations
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @provenance.json \
+  $URL/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl.provenance
+```
+
 ## API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/simple/` | Project list (JSON) |
 | GET | `/simple/<project>/` | Project file listing (JSON) |
+| PATCH | `/simple/<project>/` | Set project status |
 | GET | `/packages/<project>/<filename>` | Download package |
 | PUT | `/packages/<project>/<filename>` | Upload package |
 | DELETE | `/packages/<project>/<filename>` | Delete package |
+| PATCH | `/packages/<project>/<filename>` | Yank/unyank a file |
+| GET | `/packages/<project>/<filename>.provenance` | Download provenance |
+| PUT | `/packages/<project>/<filename>.provenance` | Upload provenance |
 
 `/simple/` endpoints require `Accept: application/vnd.pypi.simple.v1+json` (or `*/*`).
 
-Implements [Simple Repository API v1.1](https://peps.python.org/pep-0700/) with `versions`, `size`, and `upload-time` fields. Version strings are normalized per [PEP 440](https://peps.python.org/pep-0440/).
+Implements [Simple Repository API v1.4](https://packaging.python.org/en/latest/specifications/simple-repository-api/) with:
+
+- **v1.1**: `versions`, `size`, `upload-time` fields ([PEP 700](https://peps.python.org/pep-0700/))
+- **v1.2**: File yanking ([PEP 592](https://peps.python.org/pep-0592/))
+- **v1.3**: Index-hosted attestations / provenance ([PEP 740](https://peps.python.org/pep-0740/))
+- **v1.4**: Project status markers ([PEP 792](https://peps.python.org/pep-0792/))
+
+Version strings are normalized per [PEP 440](https://peps.python.org/pep-0440/).
 
 ## R2 storage layout
 
 ```
-simple/index.json                         # root project list
-simple/<normalized-project>/index.json    # per-project file listing
-packages/<normalized-project>/<filename>  # .whl / .tar.gz files
+simple/index.json                                    # root project list
+simple/<normalized-project>/index.json               # per-project file listing
+packages/<normalized-project>/<filename>             # .whl / .tar.gz files
+packages/<normalized-project>/<filename>.provenance  # provenance attestations
 ```
 
 ## Caching
