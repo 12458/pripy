@@ -71,7 +71,7 @@ describe("pripy", () => {
 			const res = await call("GET", "/simple/", { accept: JSON_ACCEPT });
 			expect(res.status).toBe(200);
 			const data = await res.json() as any;
-			expect(data.meta["api-version"]).toBe("1.1");
+			expect(data.meta["api-version"]).toBe("1.4");
 			expect(data.projects).toEqual([]);
 		});
 
@@ -418,6 +418,167 @@ describe("pripy", () => {
 			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
 			const data = await idx.json() as any;
 			expect(data.files[0].yanked).toBeUndefined();
+		});
+	});
+
+	describe("project status", () => {
+		it("projects have no status by default", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await res.json() as any;
+			expect(data["project-status"]).toBeUndefined();
+		});
+
+		it("sets project status with reason", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "deprecated", reason: "use new-pkg instead" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data["project-status"]).toEqual({ status: "deprecated", reason: "use new-pkg instead" });
+		});
+
+		it("clears status with null", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "archived" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+			const res = await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": null }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(200);
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data["project-status"]).toBeUndefined();
+		});
+
+		it("setting active clears status field", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "archived" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+			await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "active" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+
+			const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+			const data = await idx.json() as any;
+			expect(data["project-status"]).toBeUndefined();
+		});
+
+		it("rejects invalid status", async () => {
+			await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+			const res = await call("PATCH", "/simple/my-pkg/", {
+				body: JSON.stringify({ "project-status": { status: "invalid" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(400);
+		});
+
+		it("returns 404 for unknown project", async () => {
+			const res = await call("PATCH", "/simple/unknown/", {
+				body: JSON.stringify({ "project-status": { status: "archived" } }),
+				headers: { "Content-Type": "application/json" },
+			});
+			expect(res.status).toBe(404);
+		});
+
+		describe("archived", () => {
+			it("blocks uploads", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "archived" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const res = await upload("my-pkg", "my_pkg-2.0.0-py3-none-any.whl");
+				expect(res.status).toBe(403);
+			});
+
+			it("still serves downloads and project index", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "data");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "archived" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const dl = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
+				expect(dl.status).toBe(200);
+				expect(await dl.text()).toBe("data");
+
+				const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+				expect(idx.status).toBe(200);
+				await idx.json();
+			});
+		});
+
+		describe("quarantined", () => {
+			it("blocks uploads", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "quarantined" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const res = await upload("my-pkg", "my_pkg-2.0.0-py3-none-any.whl");
+				expect(res.status).toBe(403);
+			});
+
+			it("hides project index", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "quarantined" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const idx = await call("GET", "/simple/my-pkg/", { accept: JSON_ACCEPT });
+				expect(idx.status).toBe(404);
+			});
+
+			it("hides downloads", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "data");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "quarantined" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const dl = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
+				expect(dl.status).toBe(404);
+			});
+		});
+
+		describe("deprecated", () => {
+			it("allows uploads", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "deprecated" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const res = await upload("my-pkg", "my_pkg-2.0.0-py3-none-any.whl");
+				expect(res.status).toBe(201);
+			});
+
+			it("serves downloads", async () => {
+				await upload("my-pkg", "my_pkg-1.0.0-py3-none-any.whl", "data");
+				await call("PATCH", "/simple/my-pkg/", {
+					body: JSON.stringify({ "project-status": { status: "deprecated" } }),
+					headers: { "Content-Type": "application/json" },
+				});
+
+				const dl = await call("GET", "/packages/my-pkg/my_pkg-1.0.0-py3-none-any.whl");
+				expect(dl.status).toBe(200);
+				expect(await dl.text()).toBe("data");
+			});
 		});
 	});
 

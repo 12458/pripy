@@ -42,9 +42,14 @@ function notFound(): Response {
 	return new Response("Not Found", { status: 404 });
 }
 
+type ProjectStatus = "active" | "archived" | "quarantined" | "deprecated";
+
+const VALID_STATUSES: ReadonlySet<string> = new Set(["active", "archived", "quarantined", "deprecated"]);
+
 interface ProjectIndex {
 	meta: { "api-version": string };
 	name: string;
+	"project-status"?: { status: ProjectStatus; reason?: string };
 	versions: string[];
 	files: {
 		filename: string;
@@ -167,7 +172,7 @@ async function getRootIndex(bucket: R2Bucket): Promise<RootIndex> {
 	if (obj) {
 		return obj.json();
 	}
-	return { meta: { "api-version": "1.1" }, projects: [] };
+	return { meta: { "api-version": "1.4" }, projects: [] };
 }
 
 async function getProjectIndex(bucket: R2Bucket, normalized: string): Promise<ProjectIndex | null> {
@@ -227,6 +232,9 @@ async function handleProjectIndex(
 	const index = await getProjectIndex(env.BUCKET, normalized);
 	if (!index) return notFound();
 
+	// Quarantined projects must not offer distributions
+	if (index["project-status"]?.status === "quarantined") return notFound();
+
 	const response = jsonResponse(index, { "Cache-Control": "public, max-age=600" });
 	ctx.waitUntil(cache.put(cacheKey, response.clone()));
 	return response;
@@ -234,6 +242,11 @@ async function handleProjectIndex(
 
 async function handlePackageDownload(env: Env, project: string, filename: string): Promise<Response> {
 	const normalized = normalizeName(project);
+
+	// Quarantined projects must not offer distributions for download
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (projectIndex?.["project-status"]?.status === "quarantined") return notFound();
+
 	const obj = await env.BUCKET.get(`packages/${normalized}/${filename}`);
 	if (!obj) return notFound();
 
@@ -257,6 +270,13 @@ async function handlePackageUpload(
 	const normalized = normalizeName(project);
 	const { body } = request;
 	if (!body) return new Response("Missing body", { status: 400 });
+
+	// Check project status: archived and quarantined projects must not accept uploads
+	const existingIndex = await getProjectIndex(env.BUCKET, normalized);
+	const projectStatus = existingIndex?.["project-status"]?.status;
+	if (projectStatus === "archived" || projectStatus === "quarantined") {
+		return new Response(`Cannot upload to ${projectStatus} project.`, { status: 403 });
+	}
 
 	// Immutability check: reject if filename already exists
 	const existing = await env.BUCKET.head(`packages/${normalized}/${filename}`);
@@ -286,7 +306,7 @@ async function handlePackageUpload(
 	if (!projectIndex) {
 		isNewProject = true;
 		projectIndex = {
-			meta: { "api-version": "1.1" },
+			meta: { "api-version": "1.4" },
 			name: normalized,
 			versions: [],
 			files: [],
@@ -412,6 +432,56 @@ async function handlePackageYank(
 	return new Response("OK", { status: 200 });
 }
 
+async function handleProjectStatus(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext,
+	project: string,
+): Promise<Response> {
+	const normalized = normalizeName(project);
+
+	const projectIndex = await getProjectIndex(env.BUCKET, normalized);
+	if (!projectIndex) return notFound();
+
+	let body: { "project-status": { status: string; reason?: string } | null };
+	try {
+		body = await request.json();
+	} catch {
+		return new Response("Invalid JSON body", { status: 400 });
+	}
+
+	const incoming = body["project-status"];
+	if (incoming === undefined) {
+		return new Response('Missing "project-status" field', { status: 400 });
+	}
+
+	if (incoming === null) {
+		delete projectIndex["project-status"];
+	} else {
+		if (!incoming.status || !VALID_STATUSES.has(incoming.status)) {
+			return new Response(
+				`"status" must be one of: ${[...VALID_STATUSES].join(", ")}`,
+				{ status: 400 },
+			);
+		}
+		if (incoming.status === "active") {
+			delete projectIndex["project-status"];
+		} else {
+			projectIndex["project-status"] = {
+				status: incoming.status as ProjectStatus,
+				...(incoming.reason ? { reason: incoming.reason } : {}),
+			};
+		}
+	}
+
+	await putProjectIndex(env.BUCKET, normalized, projectIndex);
+
+	const url = new URL(request.url);
+	ctx.waitUntil(invalidateCache(caches.default, url, [`/simple/${normalized}/`]));
+
+	return new Response("OK", { status: 200 });
+}
+
 // --- Router ---
 
 export default {
@@ -426,10 +496,13 @@ export default {
 			return handleRootIndex(request, env, ctx);
 		}
 
-		// GET /simple/<project>/ - project index
+		// /simple/<project>/ - project index (GET) or status update (PATCH)
 		const projectMatch = path.match(/^\/simple\/([^/]+)\/$/);
 		if (projectMatch && request.method === "GET") {
 			return handleProjectIndex(request, env, ctx, projectMatch[1]);
+		}
+		if (projectMatch && request.method === "PATCH") {
+			return handleProjectStatus(request, env, ctx, projectMatch[1]);
 		}
 
 		// /packages/<project>/<filename>
